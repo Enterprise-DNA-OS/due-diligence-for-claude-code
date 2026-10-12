@@ -1,0 +1,92 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {getDb,REPO_ROOT} from './lib/db.mjs';
+import {migrate} from './migrate.mjs';
+import {run,commands,reads} from './diligence.mjs';
+import {parseCsv} from './lib/csv.mjs';
+import {page,table as htmlTable} from './lib/render.mjs';
+const temp=fs.mkdtempSync(path.join(os.tmpdir(),'diligence-test-'));
+process.env.DATA_DIR=path.join(temp,'db');process.env.OUTPUT_DIR=temp;
+// Ignore real credentials; PostgreSQL CI explicitly supplies a disposable database.
+process.env.DATABASE_URL=process.env.TEST_DATABASE_URL||'';
+const db=await getDb(),seen=new Set();let assertions=0;
+async function call(cmd,...flags){seen.add(cmd);return run(db,[cmd,...flags]);}
+async function fails(cmd,flags,pattern){seen.add(cmd);await assert.rejects(()=>run(db,[cmd,...flags]),pattern);assertions++;}
+const actor='--actor=Operator',deal='--deal=Project Kauri';
+try{
+ if(db.mode==='postgres'){const [r]=await db.query("select count(*)::int as n from information_schema.tables where table_schema='public' and table_type='BASE TABLE'");assert.equal(r.n,0,'TEST_DATABASE_URL must point at a fresh empty database');}
+ await migrate(db);assert.equal((await migrate(db)).ran.length,0);
+ const seed=fs.readFileSync(path.join(REPO_ROOT,'supabase/seed.sql'),'utf8');await db.exec(seed);await db.exec(seed);
+ assert.equal((await call('deals')).length,2);assert.equal((await call('stale')).length,1);assert.equal((await call('compliance')).length,3);
+ for(const cmd of Object.keys(reads))assert.ok(Array.isArray(await call(cmd)));
+ assert.equal((await call('help')).length,commands.length);
+ assert.equal((await call('deal','--deal=project kauri')).requests.length,2);
+ assert.equal((await call('search','--text=customer')).length,2);
+ await fails('deal',['--deal=Project'],/ambiguous[\s\S]*10000000/);
+ await fails('deal',['--deal=10000000'],/ambiguous/);
+ assert.equal((await call('deal','--deal=10000000-0000-0000-0000-000000000001')).deal.name,'Project Kauri');
+ await fails('add',['--type=deal','--name=Bad','--target=Bad','--owner=A','--close-date=2026-02-30',actor],/real YYYY/);
+ await fails('submit',['--request=Customer concentration schedule','--response=Received','--evidence=local://record'],/actor/);
+ await fails('submit',['--request=Customer concentration schedule','--response=Received','--evidence=local://record',actor,'--typo=x'],/Unknown/);
+ await fails('signoff',[deal,'--decision=Proceed',actor],/Signoff requires/);
+ await fails('review',['--request=Customer concentration schedule','--note=ok',actor],/submitted/);
+ await call('submit','--request=Customer concentration schedule','--response=Schedule received','--evidence=local://schedule',actor);
+ await fails('review',['--request=Customer concentration schedule','--note=ok',actor],/differ/);
+ await call('review','--request=Customer concentration schedule','--note=Reconciled totals','--actor=Reviewer');
+ await call('reopen','--request=Customer concentration schedule','--reason=Need amended schedule',actor);
+ let r=(await call('requests')).find(x=>x.name==='Customer concentration schedule');assert.equal(r.reviewer,null);assert.equal(r.evidence,null);
+ await call('submit','--request=Customer concentration schedule','--response=Amended schedule','--evidence=local://schedule-v2',actor);
+ await call('review','--request=Customer concentration schedule','--note=Reviewed amended schedule','--actor=Reviewer');
+ await fails('submit',['--request=Customer concentration schedule','--response=x','--evidence=x',actor],/Reopen/);
+ await call('review','--request=Lease change of control consent','--note=Consent scope checked','--actor=Reviewer');
+ await fails('signoff',[deal,'--decision=Proceed',actor],/Signoff requires/);
+ await call('resolve','--finding=Key client termination clause','--resolution=Buyer signed documented acceptance',actor);
+ await fails('resolve',['--finding=Key client termination clause','--resolution=x',actor],/already/);
+ const fresh=await call('add','--type=deal','--name=Project Test','--target=TestCo','--owner=Operator','--close-date=2026-12-01',actor);
+ const freshFlag=`--deal=${fresh.id}`;
+ const req=await call('add','--type=request','--name=Test request',freshFlag,'--owner=Operator','--due=2026-11-01','--workstream=Financial',actor);
+ await call('add','--type=finding','--name=Test finding',freshFlag,'--owner=Operator','--due=2026-11-02','--severity=low','--detail=Test issue',actor);
+ await call('add','--type=task','--name=Test task',freshFlag,'--owner=Operator','--due=2026-11-03',actor);
+ const doc=await call('add','--type=document','--name=<script>alert(1)</script>',freshFlag,'--owner=Operator','--location=local://file','--personal=true',actor);
+ await fails('review-document',[`--document=${doc.id}`,'--purpose=Review','--access-review=2099-01-01',actor],/retention/);
+ await call('review-document',`--document=${doc.id}`,'--purpose=Transaction assessment','--access-review=2099-01-01','--retention-review=2099-02-01',actor);
+ await call('review-document','--document=Staff continuity summary','--purpose=Assess continuity','--access-review=2099-01-01','--retention-review=2099-02-01',actor);
+ assert.equal((await call('compliance')).length,0);
+ await call('log',deal,'--note=Reviewed the source register',actor);
+ const src=path.join(REPO_ROOT,'examples/dealroom-requests.csv');
+ const imp=['dealroom',`--file=${src}`,freshFlag,actor];
+ const before=(await call('requests')).length;
+ const histBefore=(await call('history')).length;
+ assert.equal((await call('import',...imp,'--dry-run')).inserted,2);
+ assert.equal((await call('history')).length,histBefore);assert.equal((await call('requests')).length,before);
+ assert.equal((await call('import',...imp)).inserted,2);
+ assert.equal((await call('import',...imp)).skipped,2);
+ r=(await call('requests')).find(x=>x.source_id?.endsWith(':FIN-01'));assert.equal(r.state,'open');assert.equal(r.source_snapshot.Status,'Completed');
+ const bad=path.join(temp,'bad.csv');fs.writeFileSync(bad,'Request ID,Request,List,Assignee,Due Date,Priority\nNEW,First,Legal,A,2026-11-01,normal\nBROKEN,Second,Legal,A,not-date,normal\n');
+ await fails('import',['dealroom',`--file=${bad}`,freshFlag,actor],/real YYYY/);assert.equal((await call('requests')).length,before+2);
+ fs.writeFileSync(bad,fs.readFileSync(src,'utf8').replace('Revenue bridge','Changed revenue'));await fails('import',['dealroom',`--file=${bad}`,freshFlag,actor],/changed/);
+ fs.writeFileSync(bad,'Request ID,Request,List,Assignee,Due Date,Priority\nDUP,A,Legal,A,2026-11-01,normal\nDUP,B,Legal,A,2026-11-01,normal\n');await fails('import',['dealroom',`--file=${bad}`,freshFlag,actor],/Duplicate source/);
+ fs.writeFileSync(bad,'Reference,Question,Department,Responsible,Deadline,Importance\nMAP-1,Mapped question,Tax,A,2026-11-01,High\n');assert.equal((await call('import','dealroom',`--file=${bad}`,freshFlag,actor,`--mapping=${path.join(REPO_ROOT,'examples/column-mapping.json')}`)).inserted,1);
+ assert.throws(()=>parseCsv('A,A\n1,2'),/unique/);assert.throws(()=>parseCsv('A,B\n1'),/expected/);assert.throws(()=>parseCsv('A\n"oops'),/unclosed/);
+ assert.deepEqual(parseCsv('\uFEFFA,B\r\n"x\ny","say ""yes"""\r\n'),[{A:'x\ny',B:'say "yes"'}]);
+ await call('signoff',deal,'--decision=Proceed after reviewed conditions',actor);
+ await fails('reopen',['--request=Customer concentration schedule','--reason=change',actor],/locked/);
+ await fails('add',['--type=request','--name=Late request',deal,'--workstream=Tax','--owner=A','--due=2026-11-01',actor],/locked/);
+ await call('complete','--task=Confirm client handover owner','--evidence=local://handover',actor);
+ await fails('complete',['--task=Confirm client handover owner','--evidence=x',actor],/already/);
+ assert.equal((await call('closing-readiness')).find(x=>x.name==='Project Kauri').state,'signed-off');
+ for(const [cmd,flags] of [['weekly-review',[]],['draft-request',[`--request=${req.id}`]],['draft-decision',[deal]]]){const d=await call(cmd,...flags);assert.match(fs.readFileSync(d.file,'utf8'),/PRIVATE DRAFT/);}
+ const exported=await call('export','--out=exports/backup.json');const backup=JSON.parse(fs.readFileSync(exported.file));assert.equal(Object.keys(backup.records).length,7);assert.ok(backup.records.history.length>0);
+ await fails('export',['--out=exports/backup.json'],/EEXIST/);
+ const html=page({title:'<script>bad</script>',sections:[{title:'Records',html:htmlTable([{name:'<script>bad</script>'}])}]});assert.ok(!html.includes('<script>'));assert.match(html,/&lt;script&gt;/);
+ assert.deepEqual(commands.filter(c=>!seen.has(c)),[]);
+ await db.close();
+ for(const file of ['view.mjs','docs.mjs']){const c=spawnSync(process.execPath,[path.join(REPO_ROOT,'scripts',file)],{env:process.env,encoding:'utf8',cwd:REPO_ROOT});assert.equal(c.status,0,c.stderr);}
+ assert.ok(fs.existsSync(path.join(temp,'views/week.html')));assert.ok(fs.readdirSync(path.join(temp,'docs-out/decision-pack')).length===3);
+ const child=spawnSync(process.execPath,[path.join(REPO_ROOT,'scripts/diligence.mjs'),'deal','--deal=Project','--json'],{env:process.env,encoding:'utf8'});assert.equal(child.status,1);assert.match(child.stderr,/ambiguous/);
+ const json=spawnSync(process.execPath,[path.join(REPO_ROOT,'scripts/diligence.mjs'),'closing-readiness','--json'],{env:process.env,encoding:'utf8'});assert.equal(json.status,0,json.stderr);assert.equal(JSON.parse(json.stdout).length,3);
+ console.log(`PASS: all ${commands.length} CLI commands; seed/migration idempotence, ${assertions} rejection cases, review/signoff guards, atomic import, mapping, repeats, backups, drafts and escaped HTML (${process.platform}).`);
+}finally{try{await db.close();}catch{}fs.rmSync(temp,{recursive:true,force:true});}

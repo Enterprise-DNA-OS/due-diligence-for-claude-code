@@ -1,13 +1,71 @@
 [
   {
     "name": "week",
-    "title": "This week",
-    "subtitle": "Due Diligence for Claude Code: what needs attention, rendered by npm run view",
+    "title": "Diligence week",
+    "subtitle": "Private records. Fictional demo.",
     "sections": [
       {
-        "title": "Needs attention",
-        "note": "TODO(author): point this at the industry's attention view (overdue, stuck, quiet).",
-        "sql": "select 'replace me' as item, 'TODO(author)' as why"
+        "title": "Signing readiness",
+        "sql": "select * from closing_readiness order by close_date",
+        "columns": [
+          "name",
+          "close_date",
+          "state",
+          "unapproved_requests",
+          "open_major_findings",
+          "integration_tasks"
+        ]
+      },
+      {
+        "title": "Unanswered requests",
+        "sql": "select * from request_chase order by days_overdue desc",
+        "columns": [
+          "deal",
+          "name",
+          "owner",
+          "priority",
+          "due",
+          "days_overdue"
+        ]
+      },
+      {
+        "title": "Evidence for review",
+        "sql": "select * from review_queue order by due",
+        "columns": [
+          "deal",
+          "name",
+          "submitted_by",
+          "due",
+          "evidence"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "handover",
+    "title": "Integration and privacy review",
+    "sections": [
+      {
+        "title": "Open integration tasks",
+        "sql": "select * from integration_week order by due",
+        "columns": [
+          "deal",
+          "deal_state",
+          "name",
+          "owner",
+          "due",
+          "days_overdue"
+        ]
+      },
+      {
+        "title": "Privacy record prompts",
+        "sql": "select * from compliance_gaps order by rule,record",
+        "columns": [
+          "rule",
+          "deal",
+          "record",
+          "issue"
+        ]
       }
     ]
   }

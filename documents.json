@@ -1,11 +1,42 @@
 [
   {
-    "name": "example",
-    "title": "TODO(author): the first document this industry must produce",
-    "for_each": "select gen_random_uuid() as id, 'Example' as name",
+    "name": "decision-pack",
+    "title": "Diligence decision pack: private draft",
+    "for_each": "select id,name from deals order by name",
     "file": "name",
     "sections": [
-      { "title": "Details", "sql": "select 'replace me' as item, $1::text as record_id" }
+      {
+        "title": "Deal",
+        "sql": "select name,target,owner,close_date,state,thesis,decision,approved_by from deals where id=$1"
+      },
+      {
+        "title": "Requests and reviews",
+        "sql": "select name,workstream,owner,due,state,evidence,reviewer,review_note from requests where deal_id=$1 order by due"
+      },
+      {
+        "title": "Findings",
+        "sql": "select name,severity,detail,state,resolution from findings where deal_id=$1 order by due"
+      },
+      {
+        "title": "Privacy prompts",
+        "sql": "select rule,record,issue from compliance_gaps where deal_id=$1"
+      }
+    ]
+  },
+  {
+    "name": "handover-plan",
+    "title": "Integration handover plan: private draft",
+    "for_each": "select id,name from deals order by name",
+    "file": "name",
+    "sections": [
+      {
+        "title": "Agreed actions",
+        "sql": "select name,owner,due,state,evidence from tasks where deal_id=$1 order by due"
+      },
+      {
+        "title": "Deal notes",
+        "sql": "select actor,body,created_at from notes where deal_id=$1 order by created_at"
+      }
     ]
   }
 ]
